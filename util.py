@@ -168,7 +168,9 @@ def find_temp_scale(model, tokenizer, val_dset, num_classes=100, text_template='
         batch_size=batch_size,
         device=device
     )
-    q = 1 - (0.83 / num_classes)
+    def func(n_classes):
+        return 1 - (1.25 * np.log10(n_classes)) / n_classes
+    q = func(num_classes)
     return find_temp_scale_with_q(q, text_probs, device)
 
 
