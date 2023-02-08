@@ -120,7 +120,7 @@ def find_temp_scale_with_q(q, text_probs, device):
 
 def get_text_probs(model, tokenizer, val_dset,
         text_template='{}', batch_size=128, device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')):
-
+    pass
     
 
 
