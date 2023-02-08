@@ -5,6 +5,7 @@ from scipy.stats import norm
 import torch.nn as nn
 from torchvision import datasets
 import torch.optim as optim
+from tqdm import tqdm
 
 def get_preds(model, tokenizer, dset, text_template='{}', temp_scaling=None, batch_size=128,
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')):
@@ -72,6 +73,17 @@ def get_metrics(y_true, preds, confs):
   overall_acc = np.mean(y_true == preds)
   return ECE, MCE, overall_acc
 
+def sample_quantile(min, max, step, val_text_probs, device, model, tokenizer, test_set, text_template):
+    temps_learned = []
+    eces_learned = []
+    x_axis = np.arange(min, max, step)
+    for q in (x_axis):
+        scaled_temp = find_temp_scale_with_q(q, val_text_probs, device)
+        temps_learned.append(scaled_temp)
+        predictions, actual, probs = get_preds(model, tokenizer, test_set, text_template=text_template, temp_scaling=scaled_temp)
+        ece, mce, acc = get_metrics(predictions, actual, probs)
+        eces_learned.append(ece)
+    return temps_learned, eces_learned
 
 def T_scaling(logits, args):
   temperature = args.get('temperature', None)
@@ -118,24 +130,18 @@ def find_temp_scale_with_q(q, text_probs, device):
     optimizer.step(_eval)
     return temperature.item()#, temps, losses, added
 
-def get_text_probs(model, tokenizer, val_dset,
+def get_text_probs(model, tokenizer, dset,
         text_template='{}', batch_size=128, device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')):
-    pass
-    
-
-
-def find_temp_scale(model, tokenizer, val_dset, num_classes=100, text_template='{}', batch_size=128,
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')):
     ## Get all text features
-    text = tokenizer([text_template.replace('{}',x) for x in val_dset.classes])
+    text = tokenizer([text_template.replace('{}',x) for x in dset.classes])
     with torch.no_grad(), torch.cuda.amp.autocast():
         text_features = model.encode_text(text.to(device))
         text_features /= text_features.norm(dim=-1, keepdim=True)
 
     ## Get all image features
-    val_loader = DataLoader(val_dset, batch_size=batch_size, shuffle=False)
+    loader = DataLoader(dset, batch_size=batch_size, shuffle=False)
     all_val_img_features = None
-    for i, data in enumerate(val_loader, 0):
+    for i, data in enumerate(loader, 0):
         images = data[0].to(device)
         model.eval()
         with torch.no_grad(), torch.cuda.amp.autocast():
@@ -148,8 +154,22 @@ def find_temp_scale(model, tokenizer, val_dset, num_classes=100, text_template='
     
     ## Get text probs
     text_probs = (100.0 * all_val_img_features @ text_features.T)
+    return text_probs
+
+
+def find_temp_scale(model, tokenizer, val_dset, num_classes=100, text_template='{}', batch_size=128,
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')):
+
+    text_probs = get_text_probs(
+        model=model,
+        tokenizer=tokenizer,
+        dset=val_dset,
+        text_template=text_template,
+        batch_size=batch_size,
+        device=device
+    )
     q = 1 - (0.83 / num_classes)
-    return find_temp_scale_with_q(q, text_probs, device), text_probs
+    return find_temp_scale_with_q(q, text_probs, device)
 
 
 def get_openai_prompts(dset_name):
