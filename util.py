@@ -6,6 +6,8 @@ import torch.nn as nn
 from torchvision import datasets
 import torch.optim as optim
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 def get_preds(model, tokenizer, dset, text_template='{}', temp_scaling=None, batch_size=128,
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')):
@@ -58,7 +60,34 @@ def get_val_set(dataset_name, classes, val_transform):
     np.random.seed(0)
     cifar_val = (torch.utils.data.Subset(cifar_train, np.random.randint(0, len(cifar_train), 10000)))
     cifar_val.classes = classes
+    cifar_val.targets = cifar_val.dataset.targets
     return cifar_val
+
+def get_test_set(dataset_name, test_transform):
+    if dataset_name == "CIFAR10":
+        cifar_test = datasets.CIFAR10('/home/ubuntu/data/', train = False, transform = test_transform, download=True)
+        num_classes = 10
+    elif dataset_name == "CIFAR100":
+        cifar_test = datasets.CIFAR100('/home/ubuntu/data/', train = False, transform = test_transform, download=True)
+        num_classes = 100
+    else:
+        raise ValueError(f"{dataset_name} unknown")
+    classes, _ = get_openai_prompts(dataset_name)
+    cifar_test.classes = classes
+    return cifar_test, num_classes
+
+def get_overconfident_oce(y_true, preds, confs):
+  ECE = 0
+  MCE = 0
+  bins, _, bin_accs, bin_confs, bin_sizes = calc_bins(y_true, preds, confs)
+
+  for i in range(len(bins)):
+    overconf_conf_dif = min(0, bin_confs[i] - bin_accs[i])
+    ECE += (bin_sizes[i] / sum(bin_sizes)) * overconf_conf_dif
+    MCE = max(MCE, overconf_conf_dif)
+
+  overall_acc = np.mean(y_true == preds)
+  return ECE, MCE, overall_acc
 
 def get_metrics(y_true, preds, confs):
   ECE = 0
@@ -80,7 +109,7 @@ def sample_quantile(min, max, step, val_text_probs, device, model, tokenizer, te
     for q in (x_axis):
         scaled_temp = find_temp_scale_with_q(q, val_text_probs, device)
         temps_learned.append(scaled_temp)
-        predictions, actual, probs = get_preds(model, tokenizer, test_set, text_template=text_template, temp_scaling=scaled_temp)
+        predictions, actual, probs = get_preds(model, tokenizer, test_set, text_template=text_template, temp_scaling=scaled_temp, device=device)
         ece, mce, acc = get_metrics(predictions, actual, probs)
         eces_learned.append(ece)
     return temps_learned, eces_learned
@@ -88,7 +117,6 @@ def sample_quantile(min, max, step, val_text_probs, device, model, tokenizer, te
 def T_scaling(logits, args):
   temperature = args.get('temperature', None)
   return torch.div(logits, temperature)
-
 
 def find_temp_scale_with_q(q, text_probs, device):
     ## Get threshold
@@ -171,6 +199,7 @@ def find_temp_scale(model, tokenizer, val_dset, num_classes=100, text_template='
     def func(n_classes):
         return 1 - (1.25 * np.log10(n_classes)) / n_classes
     q = func(num_classes)
+
     return find_temp_scale_with_q(q, text_probs, device)
 
 
@@ -338,3 +367,42 @@ def get_openai_prompts(dset_name):
     else:
         raise ValueError(f"{dset_name} not supported")
     return classes, templates
+
+def draw_reliability_graph(y_true, preds, confs, title=None):
+  ECE, MCE, overall_acc = get_metrics(y_true, preds, confs)
+  bins, _, bin_accs, _, _ = calc_bins(y_true, preds, confs)
+
+  fig = plt.figure(figsize=(8, 8))
+  ax = fig.gca()
+
+  # x/y limits
+  ax.set_xlim(0, 1.05)
+  ax.set_ylim(0, 1)
+
+  # x/y labels
+  plt.xlabel('Confidence')
+  plt.ylabel('Accuracy')
+
+  # Create grid
+  ax.set_axisbelow(True) 
+  ax.grid(color='gray', linestyle='dashed')
+
+  # Error bars
+  plt.bar(bins, bins,  width=0.1, alpha=0.3, edgecolor='black', color='r', hatch='\\')
+
+  # Draw bars and identity line
+  plt.bar(bins, bin_accs, width=0.1, alpha=0.7, edgecolor='red', color='purple')
+  plt.bar(bins, np.minimum(bins,bin_accs), width=0.1, alpha=1, edgecolor='black', color='b')
+
+  plt.plot([0,1],[0,1], '--', color='gray', linewidth=2)
+
+  # Equally spaced axes
+  plt.gca().set_aspect('equal', adjustable='box')
+
+  # ECE and MCE legend
+  ECE_patch = mpatches.Patch(color='green', label='ECE = {:.2f}%'.format(ECE*100))
+  #MCE_patch = mpatches.Patch(color='red', label='MCE = {:.2f}%'.format(MCE*100))
+  #acc_patch = mpatches.Patch(color='orange', label='Overall Accuracy = {:.2f}%'.format(overall_acc*100))
+  plt.legend(handles=[ECE_patch])
+  if title is not None:
+    plt.title(title)
